@@ -1,0 +1,109 @@
+package io.patchfox.orchestrate_service;
+
+
+import java.io.IOException;
+import java.net.URI;
+import java.util.UUID;
+import java.util.zip.DataFormatException;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.ApplicationRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.autoconfigure.domain.EntityScan;
+import org.springframework.context.annotation.Bean;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.scheduling.annotation.EnableAsync;
+import org.springframework.scheduling.annotation.EnableScheduling;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import io.patchfox.db_entities.entities.DatasourceEvent;
+import io.patchfox.orchestrate_service.components.EnvironmentComponent;
+import io.patchfox.orchestrate_service.controllers.RestInfoController;
+import io.patchfox.orchestrate_service.helpers.RestHelper;
+import io.patchfox.orchestrate_service.repositories.DatasourceEventRepository;
+import io.patchfox.package_utils.data.build.git.BuildGitBlame;
+import io.patchfox.package_utils.data.pkg.PackageWrapper;
+import io.patchfox.package_utils.json.ApiRequest;
+import lombok.extern.slf4j.Slf4j;
+
+
+@Slf4j
+@EnableScheduling
+@EnableAsync
+@SpringBootApplication
+@EntityScan("io.patchfox.db_entities.entities")
+public class App {
+
+    @Autowired
+    DatasourceEventRepository datasourceEventRepository;
+
+    @Autowired 
+    EnvironmentComponent env;
+
+    @Autowired
+    RestHelper restHelper;
+
+
+	public static void main(String[] args) {
+		SpringApplication.run(App.class, args);
+	}
+
+    //
+    // this is how you send a message on the Kafka queue
+    //
+    // leave this uncommented - it not only smoke tests kafka on boot, it prints a list of available resource signatures 
+    // to the log.
+    @Bean
+    public ApplicationRunner runner(KafkaTemplate<String, ApiRequest> template) {
+
+        // in case it's not already there we're going to want an index on commit_datetime
+        datasourceEventRepository.createDatasourceEventCommitDatetimeIndex();
+
+        log.info("*!* SENDING TEST KAFKA MESSAGE *!*");
+
+        var testMessage = ApiRequest.builder()
+                                    .txid(UUID.randomUUID())
+                                    .verb(ApiRequest.httpVerb.GET)
+                                    .uri(URI.create(RestInfoController.REST_INFO_PATH))
+                                    // setting ourselves as the intended receiver for response
+                                    // in theory you can route the response to another service instance by setting this
+                                    // to that service's response topic. 
+                                    .responseTopicName(env.getKafkaResponseTopicName()) 
+                                    .build();
+
+        return args -> {
+            template.send(env.getKafkaRequestTopicName(), testMessage);
+        };
+    }
+
+
+    //
+    // this is how you make a REST request
+    //
+
+    // @Bean
+    // public ApplicationRunner runner1(RestHelper restHelper) {
+    //     log.info("*!* SENDING TEST REST REQUEST *!*");
+
+    //     return args -> {
+    //         var testRequest = ApiRequest.builder()
+    //                                     .txid(UUID.randomUUID())
+    //                                     .verb(ApiRequest.httpVerb.GET)
+    //                                     .uri(URI.create("http://worldtimeapi.org/api/timezone/America/Denver"))
+    //                                     .responseTopicName(env.getServiceName())
+    //                                     .build();
+
+    //         try {
+    //             var r = restHelper.makeRequest(testRequest);
+    //             log.info("REST response is: {}", r);
+    //         } catch (IllegalArgumentException e) {
+    //             log.error("caught unexpected exception while attempting to make REST request", e);
+    //         }
+            
+    //     };
+    // }
+
+}
