@@ -92,7 +92,6 @@ public class Peristalsis {
         
         checkStartEnrichment();
         checkDoneEnrichment();
-        checkDoneAnalyze();
         //checkDoneForecast();
         //checkDoneRecommend();
     }
@@ -344,13 +343,13 @@ public class Peristalsis {
 
             datasourceEventRepository.setProcessingFlag(jobId);
 
-            for (var ds : dataset.getDatasources()) {
-                if (ds.getStatus().equals(Datasource.Status.READY_FOR_NEXT_PROCESSING)) {
-                    ds.setStatus(Datasource.Status.PROCESSING);
-                }
-            }
-            datasourceRepository.saveAll(dataset.getDatasources());
-
+            // for (var ds : dataset.getDatasources()) {
+            //     if (ds.getStatus().equals(Datasource.Status.READY_FOR_NEXT_PROCESSING)) {
+            //         ds.setStatus(Datasource.Status.PROCESSING);
+            //     }
+            // }
+            // datasourceRepository.saveAll(dataset.getDatasources());
+            datasourceRepository.markProcessing(dataset);
 
             var analyzeRequest = ApiRequest.builder()
                                             // for all internal pipeline requests that are job-related we 
@@ -384,139 +383,139 @@ public class Peristalsis {
     }
 
 
-    /**
-     * 
-     */
-    public void checkDoneAnalyze() {
-        log.info("running checkDoneAnalyze...");
-        // find all datasets ready for processing 
-        List<Dataset> datasets = datasetRepository.findAllByStatus(Dataset.Status.PROCESSING);
+    // /**
+    //  * 
+    //  */
+    // public void checkDoneAnalyze() {
+    //     log.info("running checkDoneAnalyze...");
+    //     // find all datasets ready for processing 
+    //     List<Dataset> datasets = datasetRepository.findAllByStatus(Dataset.Status.PROCESSING);
 
-        for (var ds : datasetRepository.findAll()) {
-            log.info("dataset: {}  status: {}", ds.getName(), ds.getStatus());
-        }
+    //     for (var ds : datasetRepository.findAll()) {
+    //         log.info("dataset: {}  status: {}", ds.getName(), ds.getStatus());
+    //     }
 
-        // nothing to do if there's nothing ready for processing 
-        if (datasets.isEmpty()) { 
-            log.info("no datasets in state {} at this time.", Dataset.Status.PROCESSING);
-            log.info("checkDoneAnalyze done");
-            return; 
-        }
+    //     // nothing to do if there's nothing ready for processing 
+    //     if (datasets.isEmpty()) { 
+    //         log.info("no datasets in state {} at this time.", Dataset.Status.PROCESSING);
+    //         log.info("checkDoneAnalyze done");
+    //         return; 
+    //     }
 
-        // go through every datasourceEvent in every constituent datasource to see if oss enrichment was 
-        // completed for all events currently being processed 
-        for (var dataset : datasets) {
-            log.info("checking dataset: {}", dataset.getName());
-            var datasources = dataset.getDatasources();
+    //     // go through every datasourceEvent in every constituent datasource to see if oss enrichment was 
+    //     // completed for all events currently being processed 
+    //     for (var dataset : datasets) {
+    //         log.info("checking dataset: {}", dataset.getName());
+    //         var datasources = dataset.getDatasources();
 
-            var hasBeenEnrichedCount = 0;
-            var readyForProcessingCount = 0;
-            var datasourcesInErrorState = 0;
-            //List<Long> datasourceEventIdsReadyForForecast = new ArrayList<Long>();
+    //         var hasBeenEnrichedCount = 0;
+    //         var readyForProcessingCount = 0;
+    //         var datasourcesInErrorState = 0;
+    //         //List<Long> datasourceEventIdsReadyForForecast = new ArrayList<Long>();
 
-            for (var datasource : datasources) {
-                log.debug("checking analyzed for datasource: {}", datasource.getPurl());
+    //         for (var datasource : datasources) {
+    //             log.debug("checking analyzed for datasource: {}", datasource.getPurl());
 
-                // this happens when a new datasource pushes data to the dataset while the dataset is processing 
-                if (datasource.getStatus().equals(Datasource.Status.READY_FOR_PROCESSING)) {
-                    readyForProcessingCount += 1;
-                    continue;
-                }
+    //             // this happens when a new datasource pushes data to the dataset while the dataset is processing 
+    //             if (datasource.getStatus().equals(Datasource.Status.READY_FOR_PROCESSING)) {
+    //                 readyForProcessingCount += 1;
+    //                 continue;
+    //             }
 
-                if (datasource.getStatus().equals(Datasource.Status.PROCESSING_ERROR)) {
-                    datasourcesInErrorState += 1;
-                    continue;
-                }
+    //             if (datasource.getStatus().equals(Datasource.Status.PROCESSING_ERROR)) {
+    //                 datasourcesInErrorState += 1;
+    //                 continue;
+    //             }
 
-                var datasourcePurl = datasource.getPurl();
+    //             var datasourcePurl = datasource.getPurl();
 
-                var countByDatasourceEventsInProcessing = 
-                    datasourceEventRepository.countByDatasourcePurlAndStatus(
-                        datasourcePurl, 
-                        DatasourceEvent.Status.PROCESSING  
-                    );
+    //             var countByDatasourceEventsInProcessing = 
+    //                 datasourceEventRepository.countByDatasourcePurlAndStatus(
+    //                     datasourcePurl, 
+    //                     DatasourceEvent.Status.PROCESSING  
+    //                 );
 
-                var countByDatasourceEventsInProcessingReadyForForecast = 
-                    datasourceEventRepository.countByDatasourcePurlAndStatusAndOssEnrichedTrueAndPackageIndexEnrichedTrueAndAnalyzedTrueAndForecastedFalse(
-                        datasourcePurl, 
-                        DatasourceEvent.Status.READY_FOR_NEXT_PROCESSING
-                    );
+    //             var countByDatasourceEventsInProcessingReadyForForecast = 
+    //                 datasourceEventRepository.countByDatasourcePurlAndStatusAndOssEnrichedTrueAndPackageIndexEnrichedTrueAndAnalyzedTrueAndForecastedFalse(
+    //                     datasourcePurl, 
+    //                     DatasourceEvent.Status.READY_FOR_NEXT_PROCESSING
+    //                 );
 
-                if (
-                    countByDatasourceEventsInProcessing == 0
-                    && countByDatasourceEventsInProcessingReadyForForecast > 0
-                ) {
-                    hasBeenEnrichedCount += 1;
+    //             if (
+    //                 countByDatasourceEventsInProcessing == 0
+    //                 && countByDatasourceEventsInProcessingReadyForForecast > 0
+    //             ) {
+    //                 hasBeenEnrichedCount += 1;
 
-                    //datasourceEventIdsReadyForForecast.addAll(datasourceEventIdsReadyForForecast);
-                } 
+    //                 //datasourceEventIdsReadyForForecast.addAll(datasourceEventIdsReadyForForecast);
+    //             } 
 
-            }
+    //         }
 
-            // // these were sorted on a per datasource basis and we need them globally sorted
-            // // TODO this is a shite way to do this... 
-            // datasourceEventIdsReadyForForecast = 
-            //     datasourceEventRepository.getDatasourceEventIdsOrderedByCommitDatetimeAsc(datasourceEventIdsReadyForForecast);
+    //         // // these were sorted on a per datasource basis and we need them globally sorted
+    //         // // TODO this is a shite way to do this... 
+    //         // datasourceEventIdsReadyForForecast = 
+    //         //     datasourceEventRepository.getDatasourceEventIdsOrderedByCommitDatetimeAsc(datasourceEventIdsReadyForForecast);
 
-            // log.info("sorted datasourceEventIdsReadyForForecast size: {}", datasourceEventIdsReadyForForecast.size());
+    //         // log.info("sorted datasourceEventIdsReadyForForecast size: {}", datasourceEventIdsReadyForForecast.size());
 
-            // if all datasources currently being processed have been oss enriched send 
-            if (hasBeenEnrichedCount == (datasources.size() - readyForProcessingCount - datasourcesInErrorState)) {
-                log.info("analyze step complete for dataset: {}", dataset.getName());
-                log.info("invoking forecast-service...");
+    //         // if all datasources currently being processed have been oss enriched send 
+    //         if (hasBeenEnrichedCount == (datasources.size() - readyForProcessingCount - datasourcesInErrorState)) {
+    //             log.info("analyze step complete for dataset: {}", dataset.getName());
+    //             log.info("invoking forecast-service...");
 
-                for (var datasource : datasources) {
-                    if (
-                        datasource.getStatus().equals(Datasource.Status.READY_FOR_PROCESSING)
-                        || datasource.getStatus().equals(Datasource.Status.PROCESSING_ERROR)
-                ) { 
-                    continue; 
-                }
+    //             // for (var datasource : datasources) {
+    //             //     if (
+    //             //         datasource.getStatus().equals(Datasource.Status.READY_FOR_PROCESSING)
+    //             //         || datasource.getStatus().equals(Datasource.Status.PROCESSING_ERROR)
+    //             // ) { 
+    //             //     continue; 
+    //             // }
                     
-                    var datasourcePurl = datasource.getPurl();
-                    var datasourceEventRecords = datasourceEventRepository.findAllByDatasourcePurlAndStatus(
-                        datasourcePurl,
-                        DatasourceEvent.Status.READY_FOR_NEXT_PROCESSING
-                    );
+    //             //     var datasourcePurl = datasource.getPurl();
+    //             //     var datasourceEventRecords = datasourceEventRepository.findAllByDatasourcePurlAndStatus(
+    //             //         datasourcePurl,
+    //             //         DatasourceEvent.Status.READY_FOR_NEXT_PROCESSING
+    //             //     );
     
-                    if ( !datasourceEventRecords.isEmpty() ) {
-                        log.info("marking datasource: {} as: {}", datasource.getPurl(), Datasource.Status.IDLE);
-                        datasource.setStatus(Datasource.Status.IDLE);
-                        datasourceRepository.save(datasource); 
+    //             //     if ( !datasourceEventRecords.isEmpty() ) {
+    //             //         log.info("marking datasource: {} as: {}", datasource.getPurl(), Datasource.Status.IDLE);
+    //             //         datasource.setStatus(Datasource.Status.IDLE);
+    //             //         datasourceRepository.save(datasource); 
 
-                        for (var datasourceEventRecord : datasourceEventRecords) {
-                            datasourceEventRecord.setStatus(DatasourceEvent.Status.PROCESSED);
-                            datasourceEventRepository.save(datasourceEventRecord);
-                        }
-                    }
+    //             //         for (var datasourceEventRecord : datasourceEventRecords) {
+    //             //             datasourceEventRecord.setStatus(DatasourceEvent.Status.PROCESSED);
+    //             //             datasourceEventRepository.save(datasourceEventRecord);
+    //             //         }
+    //             //     }
 
-                } 
+    //             // } 
 
-                if (dataset.getStatus() != Dataset.Status.PROCESSING_ERROR) {
-                    log.info("marking dataset: {} as: {}", dataset.getName(), Dataset.Status.IDLE);
-                    dataset.setStatus(Dataset.Status.IDLE);
-                    datasetRepository.save(dataset);
-                }
+    //             // if (dataset.getStatus() != Dataset.Status.PROCESSING_ERROR) {
+    //             //     log.info("marking dataset: {} as: {}", dataset.getName(), Dataset.Status.IDLE);
+    //             //     dataset.setStatus(Dataset.Status.IDLE);
+    //             //     datasetRepository.save(dataset);
+    //             // }
 
-                // // send event to forecast service 
-                // var forecastMessage = ApiRequest.builder()
-                //                                 // for all internal pipeline requests that are job-related we 
-                //                                 // use the jobID as the request txid so we can log-trace all the 
-                //                                 // job things across all invoked services. 
-                //                                 .txid(dataset.getLatestJobId()) 
-                //                                 .verb(ApiRequest.httpVerb.POST)
-                //                                 .uri(URI.create("/api/v1/forecast"))
-                //                                 .responseTopicName(env.getKafkaResponseTopicName()) 
-                //                                 .build();
+    //             // send event to forecast service 
+    //             var forecastMessage = ApiRequest.builder()
+    //                                             // for all internal pipeline requests that are job-related we 
+    //                                             // use the jobID as the request txid so we can log-trace all the 
+    //                                             // job things across all invoked services. 
+    //                                             .txid(dataset.getLatestJobId()) 
+    //                                             .verb(ApiRequest.httpVerb.POST)
+    //                                             .uri(URI.create("/api/v1/forecast"))
+    //                                             .responseTopicName(env.getKafkaResponseTopicName()) 
+    //                                             .build();
 
 
-                // kafka.makeRequest("forecast-service_REQUEST", forecastMessage);
+    //             kafka.makeRequest("forecast-service_REQUEST", forecastMessage);
                 
-            } 
+    //         } 
 
-        }
-        log.info("checkDoneAnalyze done");
-    }
+    //     }
+    //     log.info("checkDoneAnalyze done");
+    // }
 
 
     /**

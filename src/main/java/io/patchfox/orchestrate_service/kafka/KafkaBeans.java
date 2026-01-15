@@ -235,7 +235,9 @@ public class KafkaBeans {
                                                     )
                                                 )
                                                 .build();
-                                               
+                // because fuck you race condition in the fucking db and spring and hibernate fucks us because 
+                // ACID and @Transactional mean nothing apparently 
+                //try { Thread.sleep(10000); } catch (InterruptedException e) {}            
                 makeRequest("analyze-service_REQUEST", analyzeRequest);
             }
 
