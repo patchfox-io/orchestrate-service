@@ -4,6 +4,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import lombok.Getter;
+import lombok.Setter;
 
 
 @Getter
@@ -37,6 +38,7 @@ public class EnvironmentComponent {
     @Value("${io.patchfox.turbo.orchestrate-service.analyze.page-size}")
     Integer analyzePageSize;
 
-    @Value("${io.patchfox.turbo.orchestrate-service.peristalsis.enabled}")
-    boolean peristalsisEnabled;
+    @Setter
+    @Value("${io.patchfox.turbo.orchestrate-service.peristalsis.activated}")
+    boolean peristalsisActivated;
 }

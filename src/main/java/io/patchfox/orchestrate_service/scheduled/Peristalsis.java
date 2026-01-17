@@ -86,7 +86,8 @@ public class Peristalsis {
     //@Synchronized // <-- this might not be necessary given how @Scheduled works
     @Transactional
     public void propagate() throws StreamReadException, DatabindException, IOException, DataFormatException, InterruptedException {
-        if ( !env.isPeristalsisEnabled()) {
+        if ( !env.isPeristalsisActivated()) {
+            log.debug("peristalsis is not activated - skipping propagate()");
             return;
         }
 

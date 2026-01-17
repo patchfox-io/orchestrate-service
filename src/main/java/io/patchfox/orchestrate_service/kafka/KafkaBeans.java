@@ -29,6 +29,7 @@ import io.patchfox.db_entities.entities.Datasource;
 import io.patchfox.db_entities.entities.Dataset;
 import io.patchfox.orchestrate_service.components.EnvironmentComponent;
 import io.patchfox.orchestrate_service.controllers.HealthCheckController;
+import io.patchfox.orchestrate_service.controllers.PeristalisisController;
 import io.patchfox.orchestrate_service.controllers.RestInfoController;
 import io.patchfox.orchestrate_service.repositories.DatasetRepository;
 import io.patchfox.orchestrate_service.repositories.DatasourceEventRepository;
@@ -120,7 +121,7 @@ public class KafkaBeans {
         try {
             var requestPair = new Pair<>(verb, resource);
             var handlerMethod = restInfoService.getHandlerFor(requestPair);
-            var apiResponse = invokeMethod(txid, verb.toString(), resource.toString(), handlerMethod, now);
+            var apiResponse = invokeMethod(txid, verb.toString(), resource.toString(), handlerMethod, now, apiRequest);
             apiResponse.setResponderName(env.getServiceName());
             apiResponse.setResponderResourceSignature(resourceSignature);
             kafkaResponseTemplate.send(responseTopicName, apiResponse);
@@ -324,25 +325,27 @@ public class KafkaBeans {
 
 
     /**
-     * helper to invoke the handler method we already know is associated with a given REST URI. The method allows us 
-     * to invoke the method with the correct arguments w/o having to deal with a lot of wonky reflection that would 
-     * otherwise be necessary. 
-     * 
+     * helper to invoke the handler method we already know is associated with a given REST URI. The method allows us
+     * to invoke the method with the correct arguments w/o having to deal with a lot of wonky reflection that would
+     * otherwise be necessary.
+     *
      * @param txid
      * @param verb
      * @param resource
      * @param handlerMethod
      * @param requestReceivedAt
+     * @param apiRequest
      * @return
-     * @throws InvocationTargetException 
-     * @throws IllegalAccessException 
+     * @throws InvocationTargetException
+     * @throws IllegalAccessException
      */
     private ApiResponse invokeMethod(
             UUID txid,
             String verb,
             String resource,
-            HandlerMethod handlerMethod, 
-            ZonedDateTime requestReceivedAt
+            HandlerMethod handlerMethod,
+            ZonedDateTime requestReceivedAt,
+            ApiRequest apiRequest
     ) throws IllegalAccessException, InvocationTargetException  {
         // this should never happen so long as we call the RestInfoService helper methods first to 
         // get a hold of the reflected Method obj representing the controller for the requested resource.
@@ -368,16 +371,27 @@ public class KafkaBeans {
         log.debug("beanMethod is: {}", beanMethod);
 
         /*
-         * 
+         *
          * WHEN YOU ADD A NEW REST CONTROLLER/SERVICE THIS IS WHERE YOU ADD THE HOOK TO ENSURE THE KAFKA LISTENER
          * KNOWS HOW TO INVOKE THE CONTROLLER METHOD
-         * 
+         *
          */
         switch(restSignature) {
             case HealthCheckController.GET_PING_SIGNATURE:
             case RestInfoController.GET_REST_INFO_SIGNATURE:
+            case PeristalisisController.GET_PERISTALSIS_SIGNATURE:
                 var re = (ResponseEntity<ApiResponse>)beanMethod.invoke(bean, txid, requestReceivedAt);
                 rv = re.getBody();
+                break;
+            case PeristalisisController.POST_PERISTALSIS_SIGNATURE:
+                // extract query parameter from apiRequest
+                var queryParams = apiRequest.getQueryStringParameters();
+                var activated = false;
+                if (queryParams != null && queryParams.containsKey("activated")) {
+                    activated = Boolean.parseBoolean(queryParams.get("activated"));
+                }
+                var postRe = (ResponseEntity<ApiResponse>)beanMethod.invoke(bean, txid, requestReceivedAt, activated);
+                rv = postRe.getBody();
                 break;
         }
         return rv;
