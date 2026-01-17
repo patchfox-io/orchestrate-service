@@ -12,7 +12,7 @@
 	
 	<groupId>io.patchfox.turbo</groupId>
 	<artifactId>orchestrate-service</artifactId>
-	<version>0.0.57</version>
+	<version>0.0.59</version>
 	<name>orchestrate-service</name>
 	<description>The orchestrate service is responsible managing pipeline workflow.</description>
 	
@@ -58,7 +58,7 @@
 		<dependency>
   			<groupId>io.patchfox.utils</groupId>
   			<artifactId>package-utils</artifactId>
-  			<version>1.0.9</version>			
+  			<version>1.0.10</version>
 		</dependency>
 
 		<dependency>

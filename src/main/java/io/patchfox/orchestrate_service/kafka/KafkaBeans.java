@@ -68,6 +68,9 @@ public class KafkaBeans {
     @Autowired
     DatasourceEventRepository datasourceEventRepository;
 
+    @Autowired
+    org.springframework.jdbc.core.JdbcTemplate jdbcTemplate;
+
     //
     // create topics for other services to send and receive messages on 
     //

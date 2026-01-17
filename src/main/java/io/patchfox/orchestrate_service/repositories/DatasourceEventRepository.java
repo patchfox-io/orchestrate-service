@@ -58,7 +58,11 @@ public interface DatasourceEventRepository extends JpaRepository<DatasourceEvent
 
     long countByJobIdAndStatusAndOssEnrichedTrueAndPackageIndexEnrichedTrueAndAnalyzedFalse(UUID jobId, DatasourceEvent.Status status);
 
+    long countByJobIdAndStatusAndOssEnrichedTrue(UUID jobId, DatasourceEvent.Status status);
+
     long countByJobIdAndStatusAndForecastedTrue(UUID jobId, DatasourceEvent.Status status);
+
+    List<DatasourceEvent> findAllByJobIdAndStatusAndOssEnrichedTrueAndPackageIndexEnrichedFalse(UUID jobId, DatasourceEvent.Status status);
 
     @Query(
         "SELECT de.id " +

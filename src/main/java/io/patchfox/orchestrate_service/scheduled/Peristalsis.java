@@ -89,9 +89,11 @@ public class Peristalsis {
         if ( !env.isPeristalsisEnabled()) {
             return;
         }
-        
-        checkStartEnrichment();
-        checkDoneEnrichment();
+
+        checkStartEnrichment();  // Phase 1: Start OSS enrichment (grype)
+        checkDoneOssEnrichment(); // Phase 2: Check if OSS done, start package-index enrichment
+        checkDoneEnrichment();    // Phase 3: Check if all enrichment done
+        checkDoneAnalyze();
         //checkDoneForecast();
         //checkDoneRecommend();
     }
@@ -209,6 +211,7 @@ public class Peristalsis {
 
                     // clear the flags because we're going to reprocess them
                     datasourceEvent.setOssEnriched(false);
+                    datasourceEvent.setPackageIndexEnriched(false);
                     datasourceEvent.setAnalyzed(false);
                     datasourceEvent.setForecasted(false);
                     datasourceEvent.setRecommended(false);
@@ -240,27 +243,26 @@ public class Peristalsis {
                     // Use datasourceEvent ID as partition key for even distribution
                     String partitionKey = datasourceEvent.getId().toString();
                     kafka.makeRequest("grype-service_REQUEST", partitionKey, grypeOssMessage);
-                    // kafka.makeRequest("grype-service_REQUEST", grypeOssMessage);
 
-                    // send event to package-index service 
-                    var packageIndexMessage = ApiRequest.builder()
-                                                        // for all internal pipeline requests that are job-related we 
-                                                        // use the jobID as the request txid so we can log-trace all the 
-                                                        // job things across all invoked services. 
-                                                        .txid(jobId) 
-                                                        .verb(ApiRequest.httpVerb.POST)
-                                                        .uri(URI.create("/api/v1/enrichPackages"))
-                                                        .queryStringParameters(
-                                                            Map.of(
-                                                                "datasourceEventRecordId", Long.toString(datasourceEvent.getId())
-                                                            )
-                                                        )
-                                                        .responseTopicName(env.getKafkaResponseTopicName()) 
-                                                        .build();
+                    // Package-index enrichment now happens in checkDoneOssEnrichment() after grype completes
+                    // // send event to package-index service
+                    // var packageIndexMessage = ApiRequest.builder()
+                    //                                     // for all internal pipeline requests that are job-related we
+                    //                                     // use the jobID as the request txid so we can log-trace all the
+                    //                                     // job things across all invoked services.
+                    //                                     .txid(jobId)
+                    //                                     .verb(ApiRequest.httpVerb.POST)
+                    //                                     .uri(URI.create("/api/v1/enrichPackages"))
+                    //                                     .queryStringParameters(
+                    //                                         Map.of(
+                    //                                             "datasourceEventRecordId", Long.toString(datasourceEvent.getId())
+                    //                                         )
+                    //                                     )
+                    //                                     .responseTopicName(env.getKafkaResponseTopicName())
+                    //                                     .build();
 
 
-                    kafka.makeRequest("package-index-service_REQUEST", partitionKey, packageIndexMessage);
-                    //kafka.makeRequest("package-index-service_REQUEST", packageIndexMessage);
+                    // kafka.makeRequest("package-index-service_REQUEST", partitionKey, packageIndexMessage);
 
                 }
                 
@@ -273,7 +275,80 @@ public class Peristalsis {
 
 
     /**
-     * 
+     * Check if OSS enrichment (grype) is complete, then start package-index enrichment
+     */
+    public void checkDoneOssEnrichment() {
+        log.info("running checkDoneOssEnrichment...");
+
+        // find all datasets currently being processed
+        List<Dataset> datasets = datasetRepository.findAllByStatus(Dataset.Status.PROCESSING);
+
+        if (datasets.isEmpty()) {
+            log.info("no datasets in PROCESSING state at this time.");
+            log.info("checkDoneOssEnrichment done");
+            return;
+        }
+
+        for (var dataset : datasets) {
+            log.info("checking OSS enrichment status for dataset: {}", dataset.getName());
+            var jobId = dataset.getLatestJobId();
+
+            var totalEventCount = datasourceEventRepository.countByJobId(jobId);
+            var processingErrorCount =
+                datasourceEventRepository.countByJobIdAndStatus(jobId, DatasourceEvent.Status.PROCESSING_ERROR);
+
+            var ossEnrichedCount =
+                datasourceEventRepository.countByJobIdAndStatusAndOssEnrichedTrue(
+                    jobId,
+                    DatasourceEvent.Status.READY_FOR_NEXT_PROCESSING
+                );
+
+            log.info("OSS enrichment progress for dataset {}: total={}, oss_enriched={}, errors={}",
+                dataset.getName(), totalEventCount, ossEnrichedCount, processingErrorCount);
+
+            // Check if all events are either OSS enriched or in error state
+            if (!(totalEventCount == (processingErrorCount + ossEnrichedCount))) {
+                log.info("OSS enrichment not yet complete for dataset: {}", dataset.getName());
+                continue;
+            }
+
+            log.info("OSS enrichment complete for dataset: {}", dataset.getName());
+            log.info("Starting package-index enrichment for dataset: {}", dataset.getName());
+
+            // Get all events that are OSS enriched and ready for package-index enrichment
+            var eventsReadyForPackageIndex = datasourceEventRepository.findAllByJobIdAndStatusAndOssEnrichedTrueAndPackageIndexEnrichedFalse(
+                jobId,
+                DatasourceEvent.Status.READY_FOR_NEXT_PROCESSING
+            );
+
+            log.info("Found {} events ready for package-index enrichment", eventsReadyForPackageIndex.size());
+
+            for (var datasourceEvent : eventsReadyForPackageIndex) {
+                log.info("sending datasourceEvent {} for package-index enrichment", datasourceEvent.getPurl());
+
+                var packageIndexMessage = ApiRequest.builder()
+                                                    .txid(jobId)
+                                                    .verb(ApiRequest.httpVerb.POST)
+                                                    .uri(URI.create("/api/v1/enrichPackages"))
+                                                    .queryStringParameters(
+                                                        Map.of(
+                                                            "datasourceEventRecordId", Long.toString(datasourceEvent.getId())
+                                                        )
+                                                    )
+                                                    .responseTopicName(env.getKafkaResponseTopicName())
+                                                    .build();
+
+                String partitionKey = datasourceEvent.getId().toString();
+                kafka.makeRequest("package-index-service_REQUEST", partitionKey, packageIndexMessage);
+            }
+        }
+
+        log.info("checkDoneOssEnrichment done");
+    }
+
+
+    /**
+     *
      */
     public void checkDoneEnrichment() {
         log.info("running checkDoneEnrichment...");
@@ -383,139 +458,139 @@ public class Peristalsis {
     }
 
 
-    // /**
-    //  * 
-    //  */
-    // public void checkDoneAnalyze() {
-    //     log.info("running checkDoneAnalyze...");
-    //     // find all datasets ready for processing 
-    //     List<Dataset> datasets = datasetRepository.findAllByStatus(Dataset.Status.PROCESSING);
+    /**
+     * 
+     */
+    public void checkDoneAnalyze() {
+        log.info("running checkDoneAnalyze...");
+        // find all datasets ready for processing 
+        List<Dataset> datasets = datasetRepository.findAllByStatus(Dataset.Status.PROCESSING);
 
-    //     for (var ds : datasetRepository.findAll()) {
-    //         log.info("dataset: {}  status: {}", ds.getName(), ds.getStatus());
-    //     }
+        for (var ds : datasetRepository.findAll()) {
+            log.info("dataset: {}  status: {}", ds.getName(), ds.getStatus());
+        }
 
-    //     // nothing to do if there's nothing ready for processing 
-    //     if (datasets.isEmpty()) { 
-    //         log.info("no datasets in state {} at this time.", Dataset.Status.PROCESSING);
-    //         log.info("checkDoneAnalyze done");
-    //         return; 
-    //     }
+        // nothing to do if there's nothing ready for processing 
+        if (datasets.isEmpty()) { 
+            log.info("no datasets in state {} at this time.", Dataset.Status.PROCESSING);
+            log.info("checkDoneAnalyze done");
+            return; 
+        }
 
-    //     // go through every datasourceEvent in every constituent datasource to see if oss enrichment was 
-    //     // completed for all events currently being processed 
-    //     for (var dataset : datasets) {
-    //         log.info("checking dataset: {}", dataset.getName());
-    //         var datasources = dataset.getDatasources();
+        // go through every datasourceEvent in every constituent datasource to see if oss enrichment was 
+        // completed for all events currently being processed 
+        for (var dataset : datasets) {
+            log.info("checking dataset: {}", dataset.getName());
+            var datasources = dataset.getDatasources();
 
-    //         var hasBeenEnrichedCount = 0;
-    //         var readyForProcessingCount = 0;
-    //         var datasourcesInErrorState = 0;
-    //         //List<Long> datasourceEventIdsReadyForForecast = new ArrayList<Long>();
+            var hasBeenEnrichedCount = 0;
+            var readyForProcessingCount = 0;
+            var datasourcesInErrorState = 0;
+            //List<Long> datasourceEventIdsReadyForForecast = new ArrayList<Long>();
 
-    //         for (var datasource : datasources) {
-    //             log.debug("checking analyzed for datasource: {}", datasource.getPurl());
+            for (var datasource : datasources) {
+                log.debug("checking analyzed for datasource: {}", datasource.getPurl());
 
-    //             // this happens when a new datasource pushes data to the dataset while the dataset is processing 
-    //             if (datasource.getStatus().equals(Datasource.Status.READY_FOR_PROCESSING)) {
-    //                 readyForProcessingCount += 1;
-    //                 continue;
-    //             }
+                // this happens when a new datasource pushes data to the dataset while the dataset is processing 
+                if (datasource.getStatus().equals(Datasource.Status.READY_FOR_PROCESSING)) {
+                    readyForProcessingCount += 1;
+                    continue;
+                }
 
-    //             if (datasource.getStatus().equals(Datasource.Status.PROCESSING_ERROR)) {
-    //                 datasourcesInErrorState += 1;
-    //                 continue;
-    //             }
+                if (datasource.getStatus().equals(Datasource.Status.PROCESSING_ERROR)) {
+                    datasourcesInErrorState += 1;
+                    continue;
+                }
 
-    //             var datasourcePurl = datasource.getPurl();
+                var datasourcePurl = datasource.getPurl();
 
-    //             var countByDatasourceEventsInProcessing = 
-    //                 datasourceEventRepository.countByDatasourcePurlAndStatus(
-    //                     datasourcePurl, 
-    //                     DatasourceEvent.Status.PROCESSING  
-    //                 );
+                var countByDatasourceEventsInProcessing = 
+                    datasourceEventRepository.countByDatasourcePurlAndStatus(
+                        datasourcePurl, 
+                        DatasourceEvent.Status.PROCESSING  
+                    );
 
-    //             var countByDatasourceEventsInProcessingReadyForForecast = 
-    //                 datasourceEventRepository.countByDatasourcePurlAndStatusAndOssEnrichedTrueAndPackageIndexEnrichedTrueAndAnalyzedTrueAndForecastedFalse(
-    //                     datasourcePurl, 
-    //                     DatasourceEvent.Status.READY_FOR_NEXT_PROCESSING
-    //                 );
+                var countByDatasourceEventsInProcessingReadyForForecast = 
+                    datasourceEventRepository.countByDatasourcePurlAndStatusAndOssEnrichedTrueAndPackageIndexEnrichedTrueAndAnalyzedTrueAndForecastedFalse(
+                        datasourcePurl, 
+                        DatasourceEvent.Status.READY_FOR_NEXT_PROCESSING
+                    );
 
-    //             if (
-    //                 countByDatasourceEventsInProcessing == 0
-    //                 && countByDatasourceEventsInProcessingReadyForForecast > 0
-    //             ) {
-    //                 hasBeenEnrichedCount += 1;
+                if (
+                    countByDatasourceEventsInProcessing == 0
+                    && countByDatasourceEventsInProcessingReadyForForecast > 0
+                ) {
+                    hasBeenEnrichedCount += 1;
 
-    //                 //datasourceEventIdsReadyForForecast.addAll(datasourceEventIdsReadyForForecast);
-    //             } 
+                    //datasourceEventIdsReadyForForecast.addAll(datasourceEventIdsReadyForForecast);
+                } 
 
-    //         }
+            }
 
-    //         // // these were sorted on a per datasource basis and we need them globally sorted
-    //         // // TODO this is a shite way to do this... 
-    //         // datasourceEventIdsReadyForForecast = 
-    //         //     datasourceEventRepository.getDatasourceEventIdsOrderedByCommitDatetimeAsc(datasourceEventIdsReadyForForecast);
+            // // these were sorted on a per datasource basis and we need them globally sorted
+            // // TODO this is a shite way to do this... 
+            // datasourceEventIdsReadyForForecast = 
+            //     datasourceEventRepository.getDatasourceEventIdsOrderedByCommitDatetimeAsc(datasourceEventIdsReadyForForecast);
 
-    //         // log.info("sorted datasourceEventIdsReadyForForecast size: {}", datasourceEventIdsReadyForForecast.size());
+            // log.info("sorted datasourceEventIdsReadyForForecast size: {}", datasourceEventIdsReadyForForecast.size());
 
-    //         // if all datasources currently being processed have been oss enriched send 
-    //         if (hasBeenEnrichedCount == (datasources.size() - readyForProcessingCount - datasourcesInErrorState)) {
-    //             log.info("analyze step complete for dataset: {}", dataset.getName());
-    //             log.info("invoking forecast-service...");
+            // if all datasources currently being processed have been oss enriched send 
+            if (hasBeenEnrichedCount == (datasources.size() - readyForProcessingCount - datasourcesInErrorState)) {
+                log.info("analyze step complete for dataset: {}", dataset.getName());
+                log.info("invoking forecast-service...");
 
-    //             // for (var datasource : datasources) {
-    //             //     if (
-    //             //         datasource.getStatus().equals(Datasource.Status.READY_FOR_PROCESSING)
-    //             //         || datasource.getStatus().equals(Datasource.Status.PROCESSING_ERROR)
-    //             // ) { 
-    //             //     continue; 
-    //             // }
+                for (var datasource : datasources) {
+                    if (
+                        datasource.getStatus().equals(Datasource.Status.READY_FOR_PROCESSING)
+                        || datasource.getStatus().equals(Datasource.Status.PROCESSING_ERROR)
+                ) { 
+                    continue; 
+                }
                     
-    //             //     var datasourcePurl = datasource.getPurl();
-    //             //     var datasourceEventRecords = datasourceEventRepository.findAllByDatasourcePurlAndStatus(
-    //             //         datasourcePurl,
-    //             //         DatasourceEvent.Status.READY_FOR_NEXT_PROCESSING
-    //             //     );
+                    var datasourcePurl = datasource.getPurl();
+                    var datasourceEventRecords = datasourceEventRepository.findAllByDatasourcePurlAndStatus(
+                        datasourcePurl,
+                        DatasourceEvent.Status.READY_FOR_NEXT_PROCESSING
+                    );
     
-    //             //     if ( !datasourceEventRecords.isEmpty() ) {
-    //             //         log.info("marking datasource: {} as: {}", datasource.getPurl(), Datasource.Status.IDLE);
-    //             //         datasource.setStatus(Datasource.Status.IDLE);
-    //             //         datasourceRepository.save(datasource); 
+                    if ( !datasourceEventRecords.isEmpty() ) {
+                        log.info("marking datasource: {} as: {}", datasource.getPurl(), Datasource.Status.IDLE);
+                        datasource.setStatus(Datasource.Status.IDLE);
+                        datasourceRepository.save(datasource); 
 
-    //             //         for (var datasourceEventRecord : datasourceEventRecords) {
-    //             //             datasourceEventRecord.setStatus(DatasourceEvent.Status.PROCESSED);
-    //             //             datasourceEventRepository.save(datasourceEventRecord);
-    //             //         }
-    //             //     }
+                        for (var datasourceEventRecord : datasourceEventRecords) {
+                            datasourceEventRecord.setStatus(DatasourceEvent.Status.PROCESSED);
+                            datasourceEventRepository.save(datasourceEventRecord);
+                        }
+                    }
 
-    //             // } 
+                } 
 
-    //             // if (dataset.getStatus() != Dataset.Status.PROCESSING_ERROR) {
-    //             //     log.info("marking dataset: {} as: {}", dataset.getName(), Dataset.Status.IDLE);
-    //             //     dataset.setStatus(Dataset.Status.IDLE);
-    //             //     datasetRepository.save(dataset);
-    //             // }
+                if (dataset.getStatus() != Dataset.Status.PROCESSING_ERROR) {
+                    log.info("marking dataset: {} as: {}", dataset.getName(), Dataset.Status.IDLE);
+                    dataset.setStatus(Dataset.Status.IDLE);
+                    datasetRepository.save(dataset);
+                }
 
-    //             // send event to forecast service 
-    //             var forecastMessage = ApiRequest.builder()
-    //                                             // for all internal pipeline requests that are job-related we 
-    //                                             // use the jobID as the request txid so we can log-trace all the 
-    //                                             // job things across all invoked services. 
-    //                                             .txid(dataset.getLatestJobId()) 
-    //                                             .verb(ApiRequest.httpVerb.POST)
-    //                                             .uri(URI.create("/api/v1/forecast"))
-    //                                             .responseTopicName(env.getKafkaResponseTopicName()) 
-    //                                             .build();
+                // send event to forecast service 
+                // var forecastMessage = ApiRequest.builder()
+                //                                 // for all internal pipeline requests that are job-related we 
+                //                                 // use the jobID as the request txid so we can log-trace all the 
+                //                                 // job things across all invoked services. 
+                //                                 .txid(dataset.getLatestJobId()) 
+                //                                 .verb(ApiRequest.httpVerb.POST)
+                //                                 .uri(URI.create("/api/v1/forecast"))
+                //                                 .responseTopicName(env.getKafkaResponseTopicName()) 
+                //                                 .build();
 
 
-    //             kafka.makeRequest("forecast-service_REQUEST", forecastMessage);
+                // kafka.makeRequest("forecast-service_REQUEST", forecastMessage);
                 
-    //         } 
+            } 
 
-    //     }
-    //     log.info("checkDoneAnalyze done");
-    // }
+        }
+        log.info("checkDoneAnalyze done");
+    }
 
 
     /**
