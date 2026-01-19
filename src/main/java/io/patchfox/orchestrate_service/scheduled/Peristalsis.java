@@ -84,7 +84,6 @@ public class Peristalsis {
     //@Async
     @Scheduled(fixedRate = 2, timeUnit = TimeUnit.MINUTES)
     //@Synchronized // <-- this might not be necessary given how @Scheduled works
-    @Transactional
     public void propagate() throws StreamReadException, DatabindException, IOException, DataFormatException, InterruptedException {
         if ( !env.isPeristalsisActivated()) {
             log.debug("peristalsis is not activated - skipping propagate()");
@@ -101,12 +100,13 @@ public class Peristalsis {
 
 
     /**
-     * @throws DataFormatException 
-     * @throws IOException 
-     * @throws DatabindException 
-     * @throws StreamReadException 
-     * 
+     * @throws DataFormatException
+     * @throws IOException
+     * @throws DatabindException
+     * @throws StreamReadException
+     *
      */
+    @Transactional
     public void checkStartEnrichment() throws StreamReadException, DatabindException, IOException, DataFormatException {
 
         log.info("running checkStartEnrichment...");
@@ -116,24 +116,24 @@ public class Peristalsis {
         // // in case it's not already there we're going to want an index on commit_datetime
         // datasourceEventRepository.createDatasourceEventCommitDatetimeIndex();
 
-        // find all datasets ready for processing 
-        List<Dataset> datasets = datasetRepository.findAllByStatus(Dataset.Status.READY_FOR_PROCESSING);
+        // find all datasets ready for processing
+        List<Dataset> datasets = datasetRepository.findAllByStatusWithDatasources(Dataset.Status.READY_FOR_PROCESSING);
 
         for (var ds : datasetRepository.findAll()) {
             log.info("dataset: {}  status: {}", ds.getName(), ds.getStatus());
         }
 
-        // nothing to do if there's nothing ready for processing 
-        if (datasets.isEmpty()) { 
+        // nothing to do if there's nothing ready for processing
+        if (datasets.isEmpty()) {
             log.info("nothing to process at this time");
             log.info("checkStartEnrichment done");
-            return; 
+            return;
         }
 
         //
-        // TODO 
-        // this is gonna be a problem later for cases where two datasets have the same datasource and both datasets 
-        // need to be processed 
+        // TODO
+        // this is gonna be a problem later for cases where two datasets have the same datasource and both datasets
+        // need to be processed
         //
 
         var jobId = UUID.randomUUID();
@@ -278,6 +278,7 @@ public class Peristalsis {
     /**
      * Check if OSS enrichment (grype) is complete, then start package-index enrichment
      */
+    @Transactional
     public void checkDoneOssEnrichment() {
         log.info("running checkDoneOssEnrichment...");
 
@@ -351,6 +352,7 @@ public class Peristalsis {
     /**
      *
      */
+    @Transactional
     public void checkDoneEnrichment() {
         log.info("running checkDoneEnrichment...");
 
@@ -417,15 +419,34 @@ public class Peristalsis {
             log.info("sending dataset: {} for analysis", dataset.getName());
             log.debug("sending index payload: {}", datasourceEventIdsReadyForAnalyze);
 
-            datasourceEventRepository.setProcessingFlag(jobId);
+            // Use JDBC to avoid transaction propagation issues with @Modifying queries
+            jdbcTemplate.update(
+                """
+                UPDATE datasource_event
+                SET status = 'PROCESSING'
+                WHERE oss_enriched = true
+                AND package_index_enriched = true
+                AND analyzed = false
+                AND status = 'READY_FOR_NEXT_PROCESSING'
+                AND job_id = ?
+                """,
+                jobId
+            );
 
-            // for (var ds : dataset.getDatasources()) {
-            //     if (ds.getStatus().equals(Datasource.Status.READY_FOR_NEXT_PROCESSING)) {
-            //         ds.setStatus(Datasource.Status.PROCESSING);
-            //     }
-            // }
-            // datasourceRepository.saveAll(dataset.getDatasources());
-            datasourceRepository.markProcessing(dataset);
+            // Use JDBC to avoid transaction propagation issues with @Modifying queries
+            jdbcTemplate.update(
+                """
+                UPDATE datasource
+                SET status = 'PROCESSING'
+                WHERE status = 'READY_FOR_NEXT_PROCESSING'
+                AND id IN (
+                    SELECT datasource_id
+                    FROM datasource_dataset
+                    WHERE dataset_id = ?
+                )
+                """,
+                dataset.getId()
+            );
 
             var analyzeRequest = ApiRequest.builder()
                                             // for all internal pipeline requests that are job-related we 
@@ -460,12 +481,13 @@ public class Peristalsis {
 
 
     /**
-     * 
+     *
      */
+    @Transactional
     public void checkDoneAnalyze() {
         log.info("running checkDoneAnalyze...");
-        // find all datasets ready for processing 
-        List<Dataset> datasets = datasetRepository.findAllByStatus(Dataset.Status.PROCESSING);
+        // find all datasets ready for processing
+        List<Dataset> datasets = datasetRepository.findAllByStatusWithDatasources(Dataset.Status.PROCESSING);
 
         for (var ds : datasetRepository.findAll()) {
             log.info("dataset: {}  status: {}", ds.getName(), ds.getStatus());
@@ -595,8 +617,9 @@ public class Peristalsis {
 
 
     /**
-     * 
+     *
      */
+    @Transactional
     public void checkDoneForecast() {
         log.info("running checkDoneForecast...");
         // find all datasets ready for processing 
@@ -729,10 +752,10 @@ public class Peristalsis {
         log.info("checkDoneForecast done");
     }
 
-
+    @Transactional
     public void checkDoneRecommend() {
         log.info("running checkDoneRecommend...");
-        List<Dataset> datasets = datasetRepository.findAllByStatus(Dataset.Status.PROCESSING);
+        List<Dataset> datasets = datasetRepository.findAllByStatusWithDatasources(Dataset.Status.PROCESSING);
 
 
         // nothing to do if there's nothing ready for processing 
@@ -793,7 +816,11 @@ public class Peristalsis {
             // datasourceEventRepository.saveAll(datasourceEventRecords);
 
             log.info("marking all events associated with jobId: {} as processed", jobId);
-            datasourceEventRepository.callUpdateDatasourceEventsProcessingCompletedStatus(jobId);
+            jdbcTemplate.execute("CALL update_datasource_events_processing_completed_status(?)",
+                (java.sql.PreparedStatement ps) -> {
+                    ps.setObject(1, jobId);
+                    return ps.execute();
+                });
 
             for (var datasource : dataset.getDatasources()) {
                 if ( !datasource.getStatus().equals(Datasource.Status.PROCESSING)) { continue; }               
@@ -847,7 +874,11 @@ public class Peristalsis {
 
     @Transactional
     public void callUpdateDatasourceEventsProcessingStatus(UUID jobId) {
-        jdbcTemplate.update("CALL update_datasource_events_processing_status(?)", jobId);
+        jdbcTemplate.execute("CALL update_datasource_events_processing_status(?)",
+            (java.sql.PreparedStatement ps) -> {
+                ps.setObject(1, jobId);
+                return ps.execute();
+            });
     }
 
 

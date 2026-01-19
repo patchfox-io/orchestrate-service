@@ -15,7 +15,7 @@ import io.patchfox.db_entities.entities.Datasource;
 public interface DatasourceRepository extends JpaRepository<Datasource, Long> {
     public List<Datasource> findAllByPurl(String purl);
 
-    public List<Datasource> 
+    public List<Datasource>
         findAllByStatusAndLastEventReceivedAtBefore(
             Datasource.Status status,
             ZonedDateTime before
