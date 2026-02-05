@@ -138,95 +138,120 @@ public class Peristalsis {
 
         var jobId = UUID.randomUUID();
         log.info("using jobId: {}", jobId);
-        for (var dataset : datasets) {
-            dataset.setStatus(Dataset.Status.PROCESSING);
-            dataset.setLatestJobId(jobId);
-            dataset = datasetRepository.save(dataset);
-            log.info("processing oss enrichment for dataset: {}", dataset.getName());
+        
+        // Batch update datasets
+        var now = java.sql.Timestamp.from(ZonedDateTime.now().toInstant());
+        jdbcTemplate.batchUpdate(
+            "UPDATE dataset SET status = 'PROCESSING', latest_job_id = ?, updated_at = ? WHERE id = ?",
+            datasets,
+            datasets.size(),
+            (ps, dataset) -> {
+                ps.setObject(1, jobId);
+                ps.setTimestamp(2, now);
+                ps.setLong(3, dataset.getId());
+            }
+        );
+        
+        // Refresh datasets to get updated jobId
+        datasets = datasetRepository.findAllByStatusWithDatasources(Dataset.Status.PROCESSING);
 
+        for (var dataset : datasets) {
+            log.info("processing oss enrichment for dataset: {}", dataset.getName());
             var datasources = dataset.getDatasources();
-            dataset.setUpdatedAt(ZonedDateTime.now());
-            dataset = datasetRepository.save(dataset);
 
             for (var datasource : datasources) {
-
-                if ( datasource.getStatus().equals(Datasource.Status.PROCESSING_ERROR) ) {
+                if (datasource.getStatus().equals(Datasource.Status.PROCESSING_ERROR)) {
                     log.info("skipping datasource: {} due to status of PROCESSING_ERROR", datasource);
                     continue;
                 }
 
-                log.info("running enrichment for datasource: {}", datasource.getPurl());
-                datasource.setStatus(Datasource.Status.PROCESSING);
-                datasource.setLatestJobId(jobId);
-                datasource = datasourceRepository.save(datasource);
-
-                var datasourcePurl = datasource.getPurl();
-
-                var oneOrNone = datasourceEventRepository.findFirstByDatasourcePurlAndStatusAndOssEnrichedFalseOrderByCommitDateTimeAsc(
-                    datasourcePurl,
-                    DatasourceEvent.Status.READY_FOR_PROCESSING
+                // Update datasource status in DB
+                jdbcTemplate.update(
+                    "UPDATE datasource SET status = 'PROCESSING', latest_job_id = ? WHERE id = ?",
+                    jobId,
+                    datasource.getId()
                 );
 
-                var eventsReadyForProcessing = new ArrayList<DatasourceEvent>();
+                log.info("running enrichment for datasource: {}", datasource.getPurl());
+                var datasourceId = datasource.getId();
 
-                // if oneOrNone is empty it means this datasource did not itself have an update but is part of a dataset
-                // that had one or more datasources that did. as such we need to include the latest datasourceEvent from
-                // this datasource to ensure the analyze-serice is able to perform tabulation accurately 
+                var oneOrNone = jdbcTemplate.query(
+                    """
+                    SELECT id FROM datasource_event 
+                    WHERE datasource_id = ? 
+                    AND status = 'READY_FOR_PROCESSING' 
+                    AND oss_enriched = false 
+                    ORDER BY commit_date_time ASC 
+                    LIMIT 1
+                    """,
+                    (rs, rowNum) -> rs.getLong("id"),
+                    datasourceId
+                );
+
+                List<Long> eventIds = new ArrayList<>();
+
                 if (oneOrNone.isEmpty()) {
-
-                    // // the input service won't update the txid on a datasource that doesn't have a new event to process
-                    // // we set it here to because we are reprocessing the head event for datasource and thus the 
-                    // // txid needs reflect that. 
-                    // datasource.setLatestTxid(dataset.getLatestTxid());
-                    datasource = datasourceRepository.save(datasource);
-                    var events = datasourceEventRepository.findFirstByDatasourcePurlOrderByCommitDateTimeDesc(datasourcePurl);
-
-                    if ( !events.isEmpty() ) { // should never be empty but jik...
-                        var event = events.get(0);
-                        // event.setOssEnriched(false);
-                        // event.setAnalyzed(false);
-                        // event.setForecasted(false);
-                        // event.setRecommended(false);
-                        // event.setStatus(DatasourceEvent.Status.READY_FOR_PROCESSING);
-                        eventsReadyForProcessing.add(event);
-                    }
-                    
-                } else {
-
-                    var earliestEvent = oneOrNone.get(0);
-                    var earliestEventCommitDateTime = earliestEvent.getCommitDateTime();
-                    var events = datasourceEventRepository.findAllByDatasourcePurlAndCommitDateTimeOrDatasourcePurlAndCommitDateTimeAfter(
-                        datasourcePurl, 
-                        earliestEventCommitDateTime,
-                        datasourcePurl,
-                        earliestEventCommitDateTime
+                    var latestEvents = jdbcTemplate.query(
+                        "SELECT id FROM datasource_event WHERE datasource_id = ? ORDER BY commit_date_time DESC LIMIT 1",
+                        (rs, rowNum) -> rs.getLong("id"),
+                        datasourceId
                     );
-                    eventsReadyForProcessing.addAll(events);
+                    if (!latestEvents.isEmpty()) {
+                        eventIds.add(latestEvents.get(0));
+                    }
+                } else {
+                    var earliestEventId = oneOrNone.get(0);
+                    var earliestCommitDateTime = jdbcTemplate.queryForObject(
+                        "SELECT commit_date_time FROM datasource_event WHERE id = ?",
+                        (rs, rowNum) -> rs.getTimestamp("commit_date_time"),
+                        earliestEventId
+                    );
+                    
+                    eventIds = jdbcTemplate.query(
+                        """
+                        SELECT id FROM datasource_event 
+                        WHERE datasource_id = ? 
+                        AND commit_date_time >= ? 
+                        ORDER BY commit_date_time ASC
+                        """,
+                        (rs, rowNum) -> rs.getLong("id"),
+                        datasourceId,
+                        earliestCommitDateTime
+                    );
                 }
 
-                for (var datasourceEvent : eventsReadyForProcessing) {
+                if (!eventIds.isEmpty()) {
+                    // Batch update events
+                    jdbcTemplate.batchUpdate(
+                        """
+                        UPDATE datasource_event 
+                        SET job_id = ?, 
+                            oss_enriched = false, 
+                            package_index_enriched = false, 
+                            analyzed = false, 
+                            forecasted = false, 
+                            recommended = false, 
+                            status = 'PROCESSING' 
+                        WHERE id = ?
+                        """,
+                        eventIds,
+                        eventIds.size(),
+                        (ps, eventId) -> {
+                            ps.setObject(1, jobId);
+                            ps.setLong(2, eventId);
+                        }
+                    );
+                }
+
+                for (var eventId : eventIds) {
+                    var datasourceEvent = datasourceEventRepository.findById(eventId).orElseThrow();
                     log.info("running oss enrichment for datasourceEvent: {}", datasourceEvent.getPurl());
-
-                    // the events have a unique txid but share the same jobid
-                    datasourceEvent.setJobId(jobId);
-
-                    // clear the flags because we're going to reprocess them
-                    datasourceEvent.setOssEnriched(false);
-                    datasourceEvent.setPackageIndexEnriched(false);
-                    datasourceEvent.setAnalyzed(false);
-                    datasourceEvent.setForecasted(false);
-                    datasourceEvent.setRecommended(false);
-                    datasourceEvent.setStatus(DatasourceEvent.Status.PROCESSING);
-                    datasourceEvent = datasourceEventRepository.save(datasourceEvent);
 
                     //var mapper = new ObjectMapper().findAndRegisterModules();
                     //var p = mapper.readValue(datasourceEvent.getPayload(), PackageWrapper.class);
 
                     // send event to grype service 
                     var grypeOssMessage = ApiRequest.builder()
-                                                    // for all internal pipeline requests that are job-related we 
-                                                    // use the jobID as the request txid so we can log-trace all the 
-                                                    // job things across all invoked services. 
                                                     .txid(jobId) 
                                                     .verb(ApiRequest.httpVerb.POST)
                                                     .uri(URI.create("/api/v1/grype"))
@@ -240,35 +265,10 @@ public class Peristalsis {
                                                     .responseTopicName(env.getKafkaResponseTopicName()) 
                                                     .build();
 
-
-                    // Use datasourceEvent ID as partition key for even distribution
                     String partitionKey = datasourceEvent.getId().toString();
                     kafka.makeRequest("grype-service_REQUEST", partitionKey, grypeOssMessage);
-
-                    // Package-index enrichment now happens in checkDoneOssEnrichment() after grype completes
-                    // // send event to package-index service
-                    // var packageIndexMessage = ApiRequest.builder()
-                    //                                     // for all internal pipeline requests that are job-related we
-                    //                                     // use the jobID as the request txid so we can log-trace all the
-                    //                                     // job things across all invoked services.
-                    //                                     .txid(jobId)
-                    //                                     .verb(ApiRequest.httpVerb.POST)
-                    //                                     .uri(URI.create("/api/v1/enrichPackages"))
-                    //                                     .queryStringParameters(
-                    //                                         Map.of(
-                    //                                             "datasourceEventRecordId", Long.toString(datasourceEvent.getId())
-                    //                                         )
-                    //                                     )
-                    //                                     .responseTopicName(env.getKafkaResponseTopicName())
-                    //                                     .build();
-
-
-                    // kafka.makeRequest("package-index-service_REQUEST", partitionKey, packageIndexMessage);
-
                 }
-                
             }  
-
         }
 
         log.info("checkStartEnrichment done");
@@ -309,7 +309,7 @@ public class Peristalsis {
                 dataset.getName(), totalEventCount, ossEnrichedCount, processingErrorCount);
 
             // Check if all events are either OSS enriched or in error state
-            if (!(totalEventCount == (processingErrorCount + ossEnrichedCount))) {
+            if (totalEventCount == 0 || !(totalEventCount == (processingErrorCount + ossEnrichedCount))) {
                 log.info("OSS enrichment not yet complete for dataset: {}", dataset.getName());
                 continue;
             }
@@ -386,7 +386,8 @@ public class Peristalsis {
                     DatasourceEvent.Status.READY_FOR_NEXT_PROCESSING
                 );
 
-            if (!(totalEventCount == (processingErrorCount + readyForAnalyzeCount)) ) {
+            // Skip if no events for this job or if not all events are ready
+            if (totalEventCount == 0 || !(totalEventCount == (processingErrorCount + readyForAnalyzeCount)) ) {
                 continue;
             }
 
