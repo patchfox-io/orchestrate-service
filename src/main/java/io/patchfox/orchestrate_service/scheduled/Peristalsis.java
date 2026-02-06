@@ -561,39 +561,59 @@ public class Peristalsis {
             // if all datasources currently being processed have been oss enriched send 
             if (hasBeenEnrichedCount == (datasources.size() - readyForProcessingCount - datasourcesInErrorState)) {
                 log.info("analyze step complete for dataset: {}", dataset.getName());
-                log.info("invoking forecast-service...");
 
+                // Collect all datasource IDs that need to be updated
+                List<Long> datasourceIdsToUpdate = new ArrayList<>();
+                
                 for (var datasource : datasources) {
                     if (
                         datasource.getStatus().equals(Datasource.Status.READY_FOR_PROCESSING)
                         || datasource.getStatus().equals(Datasource.Status.PROCESSING_ERROR)
-                ) { 
-                    continue; 
-                }
-                    
-                    var datasourcePurl = datasource.getPurl();
-                    var datasourceEventRecords = datasourceEventRepository.findAllByDatasourcePurlAndStatus(
-                        datasourcePurl,
-                        DatasourceEvent.Status.READY_FOR_NEXT_PROCESSING
-                    );
-    
-                    if ( !datasourceEventRecords.isEmpty() ) {
-                        log.info("marking datasource: {} as: {}", datasource.getPurl(), Datasource.Status.IDLE);
-                        datasource.setStatus(Datasource.Status.IDLE);
-                        datasourceRepository.save(datasource); 
-
-                        for (var datasourceEventRecord : datasourceEventRecords) {
-                            datasourceEventRecord.setStatus(DatasourceEvent.Status.PROCESSED);
-                            datasourceEventRepository.save(datasourceEventRecord);
-                        }
+                    ) { 
+                        continue; 
                     }
-
-                } 
+                    datasourceIdsToUpdate.add(datasource.getId());
+                }
+                
+                if (!datasourceIdsToUpdate.isEmpty()) {
+                    try (var conn = jdbcTemplate.getDataSource().getConnection()) {
+                        var eventArray = conn.createArrayOf("bigint", datasourceIdsToUpdate.toArray());
+                        var datasourceArray = conn.createArrayOf("bigint", datasourceIdsToUpdate.toArray());
+                        
+                        // Bulk update all events for all datasources in one shot
+                        int totalEventsUpdated = jdbcTemplate.update(
+                            """
+                            UPDATE datasource_event 
+                            SET status = 'PROCESSED' 
+                            WHERE datasource_id = ANY(?) 
+                            AND status = 'READY_FOR_NEXT_PROCESSING'
+                            """,
+                            eventArray
+                        );
+                        
+                        // Bulk update all datasources to IDLE
+                        int datasourcesUpdated = jdbcTemplate.update(
+                            """
+                            UPDATE datasource 
+                            SET status = 'IDLE' 
+                            WHERE id = ANY(?)
+                            """,
+                            datasourceArray
+                        );
+                        
+                        log.info("Bulk update complete: {} datasources marked IDLE, {} events marked PROCESSED", 
+                            datasourcesUpdated, totalEventsUpdated);
+                    } catch (Exception e) {
+                        log.error("Error during bulk update", e);
+                    }
+                }
 
                 if (dataset.getStatus() != Dataset.Status.PROCESSING_ERROR) {
                     log.info("marking dataset: {} as: {}", dataset.getName(), Dataset.Status.IDLE);
-                    dataset.setStatus(Dataset.Status.IDLE);
-                    datasetRepository.save(dataset);
+                    jdbcTemplate.update(
+                        "UPDATE dataset SET status = 'IDLE', updated_at = NOW() WHERE id = ?",
+                        dataset.getId()
+                    );
                 }
 
                 // send event to forecast service 
@@ -823,19 +843,40 @@ public class Peristalsis {
                     return ps.execute();
                 });
 
+            // Collect datasource IDs to update
+            List<Long> datasourceIdsToUpdate = new ArrayList<>();
             for (var datasource : dataset.getDatasources()) {
-                if ( !datasource.getStatus().equals(Datasource.Status.PROCESSING)) { continue; }               
-
-                log.info("marking datasource: {} as: {}", datasource.getPurl(), Datasource.Status.IDLE);
-                datasource.setStatus(Datasource.Status.IDLE);
-                datasourceRepository.save(datasource); 
-
-            } 
+                if (datasource.getStatus().equals(Datasource.Status.PROCESSING)) {
+                    datasourceIdsToUpdate.add(datasource.getId());
+                }
+            }
+            
+            if (!datasourceIdsToUpdate.isEmpty()) {
+                try (var conn = jdbcTemplate.getDataSource().getConnection()) {
+                    var datasourceArray = conn.createArrayOf("bigint", datasourceIdsToUpdate.toArray());
+                    
+                    // Bulk update all datasources to IDLE
+                    int datasourcesUpdated = jdbcTemplate.update(
+                        """
+                        UPDATE datasource 
+                        SET status = 'IDLE' 
+                        WHERE id = ANY(?)
+                        """,
+                        datasourceArray
+                    );
+                    
+                    log.info("Bulk update complete: {} datasources marked IDLE", datasourcesUpdated);
+                } catch (Exception e) {
+                    log.error("Error during bulk datasource update", e);
+                }
+            }
 
             if (dataset.getStatus() != Dataset.Status.PROCESSING_ERROR) {
                 log.info("marking dataset: {} as: {}", dataset.getName(), Dataset.Status.IDLE);
-                dataset.setStatus(Dataset.Status.IDLE);
-                datasetRepository.save(dataset);
+                jdbcTemplate.update(
+                    "UPDATE dataset SET status = 'IDLE', updated_at = NOW() WHERE id = ?",
+                    dataset.getId()
+                );
             }
 
         }
