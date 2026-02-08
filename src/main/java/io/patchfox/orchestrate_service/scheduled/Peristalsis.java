@@ -287,8 +287,16 @@ public class Peristalsis {
     public void checkDoneOssEnrichment() {
         log.info("running checkDoneOssEnrichment...");
 
-        // find all datasets currently being processed
-        List<Dataset> datasets = datasetRepository.findAllByStatus(Dataset.Status.PROCESSING);
+        // find all datasets currently being processed - use JDBC to avoid loading full entities
+        String sql = "SELECT id, name, latest_job_id, status FROM dataset WHERE status = ?";
+        List<Dataset> datasets = jdbcTemplate.query(sql, (rs, rowNum) -> {
+            Dataset ds = new Dataset();
+            ds.setId(rs.getLong("id"));
+            ds.setName(rs.getString("name"));
+            ds.setLatestJobId((UUID) rs.getObject("latest_job_id"));
+            ds.setStatus(Dataset.Status.valueOf(rs.getString("status")));
+            return ds;
+        }, Dataset.Status.PROCESSING.name());
 
         if (datasets.isEmpty()) {
             log.info("no datasets in PROCESSING state at this time.");
@@ -323,10 +331,22 @@ public class Peristalsis {
             log.info("Starting package-index enrichment for dataset: {}", dataset.getName());
 
             // Get all events that are OSS enriched and ready for package-index enrichment
-            var eventsReadyForPackageIndex = datasourceEventRepository.findAllByJobIdAndStatusAndOssEnrichedTrueAndPackageIndexEnrichedFalse(
-                jobId,
-                DatasourceEvent.Status.READY_FOR_NEXT_PROCESSING
-            );
+            // Use JDBC to avoid loading massive payload field into memory
+            String eventSql = """
+                SELECT id, purl 
+                FROM datasource_event 
+                WHERE job_id = ? 
+                AND status = ? 
+                AND oss_enriched = true 
+                AND package_index_enriched = false
+            """;
+            
+            var eventsReadyForPackageIndex = jdbcTemplate.query(eventSql, (rs, rowNum) -> {
+                var event = new DatasourceEvent();
+                event.setId(rs.getLong("id"));
+                event.setPurl(rs.getString("purl"));
+                return event;
+            }, jobId, DatasourceEvent.Status.READY_FOR_NEXT_PROCESSING.name());
 
             log.info("Found {} events ready for package-index enrichment", eventsReadyForPackageIndex.size());
 
@@ -361,12 +381,22 @@ public class Peristalsis {
     public void checkDoneEnrichment() {
         log.info("running checkDoneEnrichment...");
 
-        // find all datasets ready for processing 
-        List<Dataset> datasets = datasetRepository.findAllByStatus(Dataset.Status.PROCESSING);
+        // find all datasets ready for processing - use JDBC to avoid loading full entities
+        String sql = "SELECT id, name, latest_job_id, status FROM dataset WHERE status = ?";
+        List<Dataset> datasets = jdbcTemplate.query(sql, (rs, rowNum) -> {
+            Dataset ds = new Dataset();
+            ds.setId(rs.getLong("id"));
+            ds.setName(rs.getString("name"));
+            ds.setLatestJobId((UUID) rs.getObject("latest_job_id"));
+            ds.setStatus(Dataset.Status.valueOf(rs.getString("status")));
+            return ds;
+        }, Dataset.Status.PROCESSING.name());
 
-        for (var ds : datasetRepository.findAll()) {
-            log.info("dataset: {}  status: {}", ds.getName(), ds.getStatus());
-        }
+        // Log all datasets - use JDBC to avoid Hibernate relationship loading
+        jdbcTemplate.query("SELECT name, status FROM dataset", (rs, rowNum) -> {
+            log.info("dataset: {}  status: {}", rs.getString("name"), rs.getString("status"));
+            return null;
+        });
 
         // nothing to do if there's nothing ready for processing 
         if (datasets.isEmpty()) { 
@@ -499,9 +529,11 @@ public class Peristalsis {
             Dataset.Status.PROCESSING.name()
         );
 
-        for (var ds : datasetRepository.findAll()) {
-            log.info("dataset: {}  status: {}", ds.getName(), ds.getStatus());
-        }
+        // Log all datasets - use JDBC to avoid Hibernate relationship loading
+        jdbcTemplate.query("SELECT name, status FROM dataset", (rs, rowNum) -> {
+            log.info("dataset: {}  status: {}", rs.getString("name"), rs.getString("status"));
+            return null;
+        });
 
         // nothing to do if there's nothing ready for processing 
         if (datasetIds.isEmpty()) { 
@@ -655,8 +687,16 @@ public class Peristalsis {
     @Transactional
     public void checkDoneForecast() {
         log.info("running checkDoneForecast...");
-        // find all datasets ready for processing 
-        List<Dataset> datasets = datasetRepository.findAllByStatus(Dataset.Status.PROCESSING);
+        // find all datasets ready for processing - use JDBC to avoid loading full entities
+        String sql = "SELECT id, name, latest_job_id, status FROM dataset WHERE status = ?";
+        List<Dataset> datasets = jdbcTemplate.query(sql, (rs, rowNum) -> {
+            Dataset ds = new Dataset();
+            ds.setId(rs.getLong("id"));
+            ds.setName(rs.getString("name"));
+            ds.setLatestJobId((UUID) rs.getObject("latest_job_id"));
+            ds.setStatus(Dataset.Status.valueOf(rs.getString("status")));
+            return ds;
+        }, Dataset.Status.PROCESSING.name());
 
         // nothing to do if there's nothing ready for processing 
         if (datasets.isEmpty()) { 
@@ -687,7 +727,15 @@ public class Peristalsis {
 
             var mostRecentDatasourceEventTxid = mostRecentDatasourceEventTxidOptional.get();
 
-            var dsmrsWithJobId = datasetMetricsRepository.findAllByJobId(jobId);
+            // Use JDBC to avoid loading massive package_indexes arrays and edits collections
+            String metricsSql = "SELECT id, txid FROM dataset_metrics WHERE job_id = ?";
+            var dsmrsWithJobId = jdbcTemplate.query(metricsSql, (rs, rowNum) -> {
+                DatasetMetrics dm = new DatasetMetrics();
+                dm.setId(rs.getLong("id"));
+                dm.setTxid(UUID.fromString(rs.getString("txid")));
+                return dm;
+            }, jobId);
+            
             var fsmrsWithDseTxid = dsmrsWithJobId.stream()
                                                  .filter(dsmr -> dsmr.getTxid().equals(mostRecentDatasourceEventTxid))
                                                  .toList();            
@@ -816,7 +864,15 @@ public class Peristalsis {
                 continue;
             }
 
-            var dsmrsWithJobId = datasetMetricsRepository.findAllByJobId(jobId);
+            // Use JDBC to avoid loading massive package_indexes arrays and edits collections
+            String sql = "SELECT id, txid FROM dataset_metrics WHERE job_id = ?";
+            var dsmrsWithJobId = jdbcTemplate.query(sql, (rs, rowNum) -> {
+                DatasetMetrics dm = new DatasetMetrics();
+                dm.setId(rs.getLong("id"));
+                dm.setTxid(UUID.fromString(rs.getString("txid")));
+                return dm;
+            }, jobId);
+            
             var groupedByTxid = dsmrsWithJobId.stream()
                                               .collect(
                                                 Collectors.groupingBy(DatasetMetrics::getTxid)
