@@ -116,15 +116,19 @@ public class Peristalsis {
         // // in case it's not already there we're going to want an index on commit_datetime
         // datasourceEventRepository.createDatasourceEventCommitDatetimeIndex();
 
-        // find all datasets ready for processing
-        List<Dataset> datasets = datasetRepository.findAllByStatusWithDatasources(Dataset.Status.READY_FOR_PROCESSING);
+        // find all datasets ready for processing - fetch IDs only to avoid memory bloat
+        List<Long> datasetIds = jdbcTemplate.queryForList(
+            "SELECT id FROM dataset WHERE status = ?",
+            Long.class,
+            Dataset.Status.READY_FOR_PROCESSING.name()
+        );
 
         for (var ds : datasetRepository.findAll()) {
             log.info("dataset: {}  status: {}", ds.getName(), ds.getStatus());
         }
 
         // nothing to do if there's nothing ready for processing
-        if (datasets.isEmpty()) {
+        if (datasetIds.isEmpty()) {
             log.info("nothing to process at this time");
             log.info("checkStartEnrichment done");
             return;
@@ -143,21 +147,22 @@ public class Peristalsis {
         var now = java.sql.Timestamp.from(ZonedDateTime.now().toInstant());
         jdbcTemplate.batchUpdate(
             "UPDATE dataset SET status = 'PROCESSING', latest_job_id = ?, updated_at = ? WHERE id = ?",
-            datasets,
-            datasets.size(),
-            (ps, dataset) -> {
+            datasetIds,
+            datasetIds.size(),
+            (ps, datasetId) -> {
                 ps.setObject(1, jobId);
                 ps.setTimestamp(2, now);
-                ps.setLong(3, dataset.getId());
+                ps.setLong(3, datasetId);
             }
         );
         
-        // Refresh datasets to get updated jobId
-        datasets = datasetRepository.findAllByStatusWithDatasources(Dataset.Status.PROCESSING);
-
-        for (var dataset : datasets) {
+        // Process datasets one at a time to avoid memory bloat
+        for (Long datasetId : datasetIds) {
+            Dataset dataset = datasetRepository.findById(datasetId).orElseThrow();
             log.info("processing oss enrichment for dataset: {}", dataset.getName());
-            var datasources = dataset.getDatasources();
+            
+            // Fetch datasources via JDBC instead of Hibernate
+            var datasources = fetchDatasourcesForDataset(datasetId);
 
             for (var datasource : datasources) {
                 if (datasource.getStatus().equals(Datasource.Status.PROCESSING_ERROR)) {
@@ -487,25 +492,32 @@ public class Peristalsis {
     @Transactional
     public void checkDoneAnalyze() {
         log.info("running checkDoneAnalyze...");
-        // find all datasets ready for processing
-        List<Dataset> datasets = datasetRepository.findAllByStatusWithDatasources(Dataset.Status.PROCESSING);
+        // find all datasets ready for processing - fetch IDs only
+        List<Long> datasetIds = jdbcTemplate.queryForList(
+            "SELECT id FROM dataset WHERE status = ?",
+            Long.class,
+            Dataset.Status.PROCESSING.name()
+        );
 
         for (var ds : datasetRepository.findAll()) {
             log.info("dataset: {}  status: {}", ds.getName(), ds.getStatus());
         }
 
         // nothing to do if there's nothing ready for processing 
-        if (datasets.isEmpty()) { 
+        if (datasetIds.isEmpty()) { 
             log.info("no datasets in state {} at this time.", Dataset.Status.PROCESSING);
             log.info("checkDoneAnalyze done");
             return; 
         }
 
         // go through every datasourceEvent in every constituent datasource to see if oss enrichment was 
-        // completed for all events currently being processed 
-        for (var dataset : datasets) {
+        // completed for all events currently being processing 
+        for (Long datasetId : datasetIds) {
+            Dataset dataset = datasetRepository.findById(datasetId).orElseThrow();
             log.info("checking dataset: {}", dataset.getName());
-            var datasources = dataset.getDatasources();
+            
+            // Fetch datasources via JDBC instead of Hibernate
+            var datasources = fetchDatasourcesForDataset(datasetId);
 
             var hasBeenEnrichedCount = 0;
             var readyForProcessingCount = 0;
@@ -776,17 +788,22 @@ public class Peristalsis {
     @Transactional
     public void checkDoneRecommend() {
         log.info("running checkDoneRecommend...");
-        List<Dataset> datasets = datasetRepository.findAllByStatusWithDatasources(Dataset.Status.PROCESSING);
+        List<Long> datasetIds = jdbcTemplate.queryForList(
+            "SELECT id FROM dataset WHERE status = ?",
+            Long.class,
+            Dataset.Status.PROCESSING.name()
+        );
 
 
         // nothing to do if there's nothing ready for processing 
-        if (datasets.isEmpty()) { 
+        if (datasetIds.isEmpty()) { 
             log.info("no datasets in state {} at this time.", Dataset.Status.PROCESSING);
             log.info("checkDoneRecommend done");
             return; 
         }
 
-        for (var dataset : datasets) {
+        for (Long datasetId : datasetIds) {
+            Dataset dataset = datasetRepository.findById(datasetId).orElseThrow();
             var jobId = dataset.getLatestJobId();
 
             if (dataset.getStatus().equals(Dataset.Status.PROCESSING_ERROR)) {
@@ -843,9 +860,10 @@ public class Peristalsis {
                     return ps.execute();
                 });
 
-            // Collect datasource IDs to update
+            // Collect datasource IDs to update - fetch via JDBC
             List<Long> datasourceIdsToUpdate = new ArrayList<>();
-            for (var datasource : dataset.getDatasources()) {
+            var datasources = fetchDatasourcesForDataset(datasetId);
+            for (var datasource : datasources) {
                 if (datasource.getStatus().equals(Datasource.Status.PROCESSING)) {
                     datasourceIdsToUpdate.add(datasource.getId());
                 }
@@ -921,6 +939,31 @@ public class Peristalsis {
                 ps.setObject(1, jobId);
                 return ps.execute();
             });
+    }
+
+    /**
+     * Helper method to fetch datasources for a dataset using JDBC to avoid Hibernate memory bloat
+     */
+    private List<Datasource> fetchDatasourcesForDataset(Long datasetId) {
+        String sql = """
+            SELECT d.id, d.purl, d.status, d.first_event_received_at, d.last_event_received_at
+            FROM datasource d
+            JOIN datasource_dataset dd ON d.id = dd.datasource_id
+            WHERE dd.dataset_id = ?
+        """;
+        
+        return jdbcTemplate.query(sql, (rs, rowNum) -> {
+            Datasource ds = new Datasource();
+            ds.setId(rs.getLong("id"));
+            ds.setPurl(rs.getString("purl"));
+            ds.setStatus(Datasource.Status.valueOf(rs.getString("status")));
+            // Set timestamps to avoid NPE if accessed (using OffsetDateTime -> ZonedDateTime)
+            var firstReceived = rs.getObject("first_event_received_at", java.time.OffsetDateTime.class);
+            var lastReceived = rs.getObject("last_event_received_at", java.time.OffsetDateTime.class);
+            if (firstReceived != null) ds.setFirstEventReceivedAt(firstReceived.toZonedDateTime());
+            if (lastReceived != null) ds.setLastEventReceivedAt(lastReceived.toZonedDateTime());
+            return ds;
+        }, datasetId);
     }
 
 
