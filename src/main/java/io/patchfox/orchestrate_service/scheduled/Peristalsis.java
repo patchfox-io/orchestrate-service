@@ -421,8 +421,8 @@ public class Peristalsis {
                     DatasourceEvent.Status.READY_FOR_NEXT_PROCESSING
                 );
 
-            // Skip if no events for this job or if not all events are ready
-            if (totalEventCount == 0 || !(totalEventCount == (processingErrorCount + readyForAnalyzeCount)) ) {
+            // Skip if not all events are ready
+            if (!(totalEventCount == (processingErrorCount + readyForAnalyzeCount)) ) {
                 continue;
             }
 
