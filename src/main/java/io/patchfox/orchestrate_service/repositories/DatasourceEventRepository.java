@@ -44,11 +44,15 @@ public interface DatasourceEventRepository extends JpaRepository<DatasourceEvent
 
     long countByDatasourcePurlAndStatus(String datasourcePurl, DatasourceEvent.Status status);
 
+    long countByDatasourcePurlAndJobIdAndStatus(String datasourcePurl, UUID jobId, DatasourceEvent.Status status);
+
     long countByStatusAndOssEnrichedTrueAndPackageIndexEnrichedTrueAndAnalyzedFalse(DatasourceEvent.Status status); 
 
     long countByDatasourcePurlAndStatusAndOssEnrichedTrueAndPackageIndexEnrichedTrueAndAnalyzedFalse(String datasourcePurl, DatasourceEvent.Status status);
 
     long countByDatasourcePurlAndStatusAndOssEnrichedTrueAndPackageIndexEnrichedTrueAndAnalyzedTrueAndForecastedFalse(String datasourcePurl, DatasourceEvent.Status status);
+
+    long countByDatasourcePurlAndJobIdAndStatusAndOssEnrichedTrueAndPackageIndexEnrichedTrueAndAnalyzedTrueAndForecastedFalse(String datasourcePurl, UUID jobId, DatasourceEvent.Status status);
 
     long countByJobIdAndStatusAndOssEnrichedTrueAndPackageIndexEnrichedTrueAndAnalyzedTrueAndForecastedTrue(UUID jobId, DatasourceEvent.Status status);
 

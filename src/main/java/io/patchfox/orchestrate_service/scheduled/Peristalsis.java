@@ -556,6 +556,9 @@ public class Peristalsis {
             var datasourcesInErrorState = 0;
             //List<Long> datasourceEventIdsReadyForForecast = new ArrayList<Long>();
 
+            var jobId = dataset.getLatestJobId();
+            var datasourcesWithNoEventsInJob = 0;
+
             for (var datasource : datasources) {
                 log.debug("checking analyzed for datasource: {}", datasource.getPurl());
 
@@ -573,16 +576,23 @@ public class Peristalsis {
                 var datasourcePurl = datasource.getPurl();
 
                 var countByDatasourceEventsInProcessing = 
-                    datasourceEventRepository.countByDatasourcePurlAndStatus(
-                        datasourcePurl, 
+                    datasourceEventRepository.countByDatasourcePurlAndJobIdAndStatus(
+                        datasourcePurl,
+                        jobId,
                         DatasourceEvent.Status.PROCESSING  
                     );
 
                 var countByDatasourceEventsInProcessingReadyForForecast = 
-                    datasourceEventRepository.countByDatasourcePurlAndStatusAndOssEnrichedTrueAndPackageIndexEnrichedTrueAndAnalyzedTrueAndForecastedFalse(
-                        datasourcePurl, 
+                    datasourceEventRepository.countByDatasourcePurlAndJobIdAndStatusAndOssEnrichedTrueAndPackageIndexEnrichedTrueAndAnalyzedTrueAndForecastedFalse(
+                        datasourcePurl,
+                        jobId,
                         DatasourceEvent.Status.READY_FOR_NEXT_PROCESSING
                     );
+
+                if (countByDatasourceEventsInProcessing == 0 && countByDatasourceEventsInProcessingReadyForForecast == 0) {
+                    datasourcesWithNoEventsInJob += 1;
+                    continue;
+                }
 
                 if (
                     countByDatasourceEventsInProcessing == 0
@@ -603,7 +613,7 @@ public class Peristalsis {
             // log.info("sorted datasourceEventIdsReadyForForecast size: {}", datasourceEventIdsReadyForForecast.size());
 
             // if all datasources currently being processed have been oss enriched send 
-            if (hasBeenEnrichedCount == (datasources.size() - readyForProcessingCount - datasourcesInErrorState)) {
+            if (hasBeenEnrichedCount == (datasources.size() - readyForProcessingCount - datasourcesInErrorState - datasourcesWithNoEventsInJob)) {
                 log.info("analyze step complete for dataset: {}", dataset.getName());
 
                 // Collect all datasource IDs that need to be updated
