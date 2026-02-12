@@ -313,7 +313,7 @@ public class Peristalsis {
                 datasourceEventRepository.countByJobIdAndStatus(jobId, DatasourceEvent.Status.PROCESSING_ERROR);
 
             var ossEnrichedCount =
-                datasourceEventRepository.countByJobIdAndStatusAndOssEnrichedTrue(
+                datasourceEventRepository.countByJobIdAndStatusAndOssEnrichedTrueAndPackageIndexEnrichedFalse(
                     jobId,
                     DatasourceEvent.Status.READY_FOR_NEXT_PROCESSING
                 );
@@ -582,6 +582,13 @@ public class Peristalsis {
                         DatasourceEvent.Status.PROCESSING  
                     );
 
+                var countByDatasourceEventsReadyForAnalysis = 
+                    datasourceEventRepository.countByDatasourcePurlAndJobIdAndStatusAndOssEnrichedTrueAndPackageIndexEnrichedTrueAndAnalyzedFalse(
+                        datasourcePurl,
+                        jobId,
+                        DatasourceEvent.Status.READY_FOR_NEXT_PROCESSING
+                    );
+
                 var countByDatasourceEventsInProcessingReadyForForecast = 
                     datasourceEventRepository.countByDatasourcePurlAndJobIdAndStatusAndOssEnrichedTrueAndPackageIndexEnrichedTrueAndAnalyzedTrueAndForecastedFalse(
                         datasourcePurl,
@@ -589,7 +596,7 @@ public class Peristalsis {
                         DatasourceEvent.Status.READY_FOR_NEXT_PROCESSING
                     );
 
-                if (countByDatasourceEventsInProcessing == 0 && countByDatasourceEventsInProcessingReadyForForecast == 0) {
+                if (countByDatasourceEventsInProcessing == 0 && countByDatasourceEventsReadyForAnalysis == 0 && countByDatasourceEventsInProcessingReadyForForecast == 0) {
                     datasourcesWithNoEventsInJob += 1;
                     continue;
                 }
